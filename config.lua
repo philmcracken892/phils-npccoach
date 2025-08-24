@@ -18,6 +18,20 @@ Config.SpawnLocations = {
             Label = "Taxi Depot",
             ShortRange = false
         }
+    },
+	{
+        Name = "St Denis  Taxi Depot",
+        PromptCoords = vector3(2520.44, -1353.93, 46.75), 
+        WagonSpawnCoords = vector3(2527.97, -1353.30, 46.75), 
+        WagonHeading = 180.0, 
+        PromptLabel = "Spawn Taxi Wagon",
+        Blip = {
+            Sprite = 1012165077, 
+            ColorModifier = joaat('BLIP_MODIFIER_MP_COLOR_4'), 
+            Scale = 0.8,
+            Label = "Taxi Depot",
+            ShortRange = false
+        }
     }
 }
 
