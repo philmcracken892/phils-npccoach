@@ -14,8 +14,21 @@ local smoking = false -- Track smoking animation state
 local cursedActive = false -- Assume mod-specific flag, initialize as false
 local cigarProp = nil -- Track cigar prop for cleanup
 
--- Notification function using ox_lib
-local function Notify(msg, type)
+-- Notification cooldown system
+local notificationCooldowns = {}
+local NOTIFICATION_COOLDOWN_TIME = 5000 -- 5 seconds cooldown
+
+-- Enhanced notification function with cooldown
+local function Notify(msg, type, cooldownKey)
+    -- If cooldownKey is provided, check for cooldown
+    if cooldownKey then
+        local currentTime = GetGameTimer()
+        if notificationCooldowns[cooldownKey] and (currentTime - notificationCooldowns[cooldownKey]) < NOTIFICATION_COOLDOWN_TIME then
+            return -- Skip notification if still in cooldown
+        end
+        notificationCooldowns[cooldownKey] = currentTime
+    end
+    
     if lib then
         lib:notify({
             title = 'Passenger Transport',
@@ -100,13 +113,13 @@ Citizen.CreateThread(function()
                     title = 'Drop Off Passengers',
                     onSelect = function()
                         DropOffPassengers(nil, true) -- Manual drop-off for all passengers
-                        Notify('Passengers dropped off manually!', 'success')
+                        Notify('Passengers dropped off manually!', 'success', 'manual_dropoff')
                     end
                 }
             }
         })
     else
-        Notify('Error: ox_lib not loaded', 'error')
+        Notify('Error: ox_lib not loaded', 'error', 'lib_error')
     end
 end)
 
@@ -224,7 +237,7 @@ local function FindNearbyPassenger(wagonCoords)
     end
     local passenger = SpawnPassengerNearWagon(wagonCoords)
     if not passenger then
-        Notify("No passengers available at this time!", "error")
+        Notify("No passengers available at this time!", "error", "no_passengers")
     end
     return passenger
 end
@@ -266,53 +279,42 @@ local function startSmokingAnimation()
             waiting = waiting + 100
             Wait(100)
             if waiting > 5000 then
-                Notify('Issue with animation loading', 'error')
+                Notify('Issue with animation loading', 'error', 'anim_error')
                 break
             end
         end
         
         Wait(100)
         AttachEntityToEntity(prop, playerPed, boneIndex, 0.01, -0.00500, 0.01550, 0.024, 300.0, -40.0, true, true, false, true, 1, true)
-        TaskPlayAnim(playerPed, dict, anim, 8.0, -8.0, -1, 31, 0, true, 0, false, 0, false)
-        Wait(10000)
+        TaskPlayAnim(playerPed, dict, anim, 8.0, -8.0, 7000, 31, 0, true, 0, false, 0, false) -- 7000ms = 7 seconds
         
         smoking = true
-        cursedActive = true -- Assume true during animation
+        cursedActive = true
         cigarProp = prop
         
         Citizen.CreateThread(function()
-            while smoking do
-                if IsEntityPlayingAnim(playerPed, dict, anim, 3) then
-                    DisableControlAction(0, 0x07CE1E61, true) -- Move LR
-                    DisableControlAction(0, 0xF84FA74F, true) -- Move UD  
-                    DisableControlAction(0, 0xCEE12B50, true) -- Move LR
-                    DisableControlAction(0, 0xB2F377E8, true) -- Move UD
-                    DisableControlAction(0, 0x8FFC75D6, true) -- Sprint
-                    DisableControlAction(0, 0xD9D0E1C0, true) -- Duck
-                    
-                    if IsControlPressed(0, 0x3B24C470) or not cursedActive then 
-                        StopSmokingAnimation()
-                        break
-                    end
-                else
-                    TaskPlayAnim(playerPed, dict, anim, 8.0, -8.0, -1, 31, 0, true, 0, false, 0, false)
-                end
-                Wait(0)
+            Wait(7000) -- Wait for exactly 7 seconds
+            if smoking then
+                StopSmokingAnimation()
             end
         end)
     end
 end
 
--- Board NPC into wagon
+-- Optimized version of BoardNPCIntoWagon function
 local function BoardNPCIntoWagon(ped, seatIndex, dropoffIndex)
     local dropoff = Config.Dropoffs[dropoffIndex]
     local wagonCoords = GetEntityCoords(wagon)
+    
     processedNPCs[ped] = true
     table.insert(passengers, ped)
     passengerData[ped] = { dropoffIndex = dropoffIndex, seatIndex = seatIndex }
     dropoffAssignmentCounts[dropoffIndex] = (dropoffAssignmentCounts[dropoffIndex] or 0) + 1
+    
     Citizen.InvokeNative(0x283978A15512B2FE, ped, true) -- Set ped as mission entity
     ClearPedTasks(ped)
+    
+    -- Calculate door position
     local doorOffset
     if seatIndex == 3 or seatIndex == 4 or seatIndex == 5 then
         doorOffset = GetOffsetFromEntityInWorldCoords(wagon, 2.0, -1.0, 0.0)
@@ -321,39 +323,40 @@ local function BoardNPCIntoWagon(ped, seatIndex, dropoffIndex)
     else
         doorOffset = GetOffsetFromEntityInWorldCoords(wagon, 0.0, -3.0, 0.0)
     end
-    TaskGoToCoordAnyMeans(ped, doorOffset.x, doorOffset.y, doorOffset.z, 1.5, 0, false, 786603, 0)
-    Wait(5000)
-    Notify('Passenger heading to wagon door for seat ' .. seatIndex .. ', destined for ' .. dropoff.Name .. '!', 'info')
+    
+    -- Start pathfinding to door
+    TaskGoToCoordAnyMeans(ped, doorOffset.x, doorOffset.y, doorOffset.z, 2.0, 0, false, 786603, 0) -- Increased speed to 2.0
+    
+    -- REMOVED: Wait(5000) - This was causing the main delay
+    Notify('Passenger heading to wagon for seat ' .. seatIndex .. ', destined for ' .. dropoff.Name .. '!', 'info', 'passenger_boarding')
+    
     Citizen.CreateThread(function()
-        local boardingTimeout = GetGameTimer() + 20000
+        local boardingTimeout = GetGameTimer() + 12000 -- Reduced from 20000 to 12000
         local hasBoarded = false
+        
+        -- Wait for NPC to reach door (shorter timeout)
         while DoesEntityExist(ped) and DoesEntityExist(wagon) and
-              #(GetEntityCoords(ped) - doorOffset) > 0.5 and
+              #(GetEntityCoords(ped) - doorOffset) > 1.0 and -- Reduced precision from 0.5 to 1.0
               GetGameTimer() < boardingTimeout do
             Wait(100)
         end
+        
         if DoesEntityExist(ped) and DoesEntityExist(wagon) then
             if IsVehicleSeatFree(wagon, seatIndex) then
                 ClearPedTasks(ped)
-                local animDict = "script_common@shared_scenarios@stand@open_door@male"
-                local animName = "open_door"
-                RequestAnimDict(animDict)
-                local timeout = GetGameTimer() + 5000
-                while not HasAnimDictLoaded(animDict) and GetGameTimer() < timeout do
-                    Wait(100)
-                end
-                if HasAnimDictLoaded(animDict) then
-                    TaskPlayAnim(ped, animDict, animName, 8.0, -8.0, -1, 0, 0, false, false, false)
-                    Wait(1500)
-                    RemoveAnimDict(animDict)
-                end
-                TaskEnterVehicle(ped, wagon, 10000, seatIndex, 1.0, 1, 0)
-                local enterTimeout = GetGameTimer() + 10000
+                
+                -- SIMPLIFIED: Skip door animation for faster boarding
+                -- Just directly enter the vehicle
+                TaskEnterVehicle(ped, wagon, 5000, seatIndex, 2.0, 1, 0) -- Reduced timeout and increased speed
+                
+                local enterTimeout = GetGameTimer() + 6000 -- Reduced from 10000 to 6000
                 while DoesEntityExist(ped) and DoesEntityExist(wagon) and
                       not IsPedInVehicle(ped, wagon, false) and
                       GetGameTimer() < enterTimeout do
                     Wait(100)
                 end
+                
+                -- Ensure NPC is in correct seat
                 if IsPedInVehicle(ped, wagon, false) then
                     local currentSeat = -1
                     for i = -1, 11 do
@@ -362,18 +365,21 @@ local function BoardNPCIntoWagon(ped, seatIndex, dropoffIndex)
                             break
                         end
                     end
-                    if currentSeat == seatIndex then
-                        hasBoarded = true
-                    else
+                    
+                    if currentSeat ~= seatIndex then
+                        -- Force warp if in wrong seat
                         ClearPedTasks(ped)
                         TaskWarpPedIntoVehicle(ped, wagon, seatIndex)
-                        hasBoarded = true
                     end
+                    hasBoarded = true
                 else
+                    -- Force warp as fallback
                     ClearPedTasks(ped)
                     TaskWarpPedIntoVehicle(ped, wagon, seatIndex)
                     hasBoarded = true
                 end
+                
+                -- Set up GPS and blips after successful boarding
                 if hasBoarded then
                     if Config.ShowGPS then
                         StartGpsMultiRoute(joaat("COLOR_RED"), true, true)
@@ -382,20 +388,24 @@ local function BoardNPCIntoWagon(ped, seatIndex, dropoffIndex)
                     else
                         SetNewWaypoint(dropoff.Coords.x, dropoff.Coords.y)
                     end
+                    
                     dropoffBlip = Citizen.InvokeNative(0x554D9D53F696D002, 1664425300, dropoff.Coords.x, dropoff.Coords.y, dropoff.Coords.z)
                     SetBlipSprite(dropoffBlip, Config.Blips.Dropoff.Sprite)
                     BlipAddModifier(dropoffBlip, Config.Blips.Dropoff.ColorModifier)
                     Citizen.InvokeNative(0x9CB1A1623062F402, dropoffBlip, Config.Blips.Dropoff.Label)
                     Citizen.InvokeNative(0xD3A0DAFBF374FDB1, dropoffBlip, Config.Blips.Dropoff.Scale)
+                    
                     if Config.Blips.Dropoff.ShortRange then
-                        Citizen.InvokeNative(0xB7C6D71F8B188BC4, dropoffBlip, true) -- Set short range
+                        Citizen.InvokeNative(0xB7C6D71F8B188BC4, dropoffBlip, true)
                     end
                     if Config.Blips.Dropoff.Flashing then
-                        Citizen.InvokeNative(0x3E2F588AFD9B0FC7, dropoffBlip, true) -- Enable flashing
+                        Citizen.InvokeNative(0x3E2F588AFD9B0FC7, dropoffBlip, true)
                     end
                 end
             end
         end
+        
+        -- Cleanup if boarding failed
         if not hasBoarded and DoesEntityExist(ped) then
             for i, p in ipairs(passengers) do
                 if p == ped then
@@ -405,12 +415,13 @@ local function BoardNPCIntoWagon(ped, seatIndex, dropoffIndex)
             end
             passengerData[ped] = nil
             processedNPCs[ped] = nil
+            
             if not IsEntityAMissionEntity(ped) then
                 ClearPedTasks(ped)
             else
                 DeletePed(ped)
             end
-            Notify('Passenger could not board!', 'error')
+            Notify('Passenger could not board!', 'error', 'boarding_failed')
         end
     end)
 end
@@ -436,7 +447,7 @@ local function TrySpawnNewPassenger()
                 BoardNPCIntoWagon(passenger, availableSeats[1], destinationIndex)
             end
         else
-            Notify("Drive further from drop-off points to pick up new passengers.", "warning")
+            Notify("Drive further from drop-off points to pick up new passengers.", "warning", "too_close_dropoff")
         end
     end
 end
@@ -444,19 +455,19 @@ end
 -- Spawn taxi wagon
 local function SpawnTaxiWagon(coords, heading)
     if not Config.EnablePassengerTransport then
-        Notify("Passenger transport is disabled in the config.", "error")
+        Notify("Passenger transport is disabled in the config.", "error", "transport_disabled")
         return false
     end
     if not HasTaxiJob() then
-        Notify("You must be a taxi driver to spawn a taxi!", "error")
+        Notify("You must be a taxi driver to spawn a taxi!", "error", "not_taxi_driver")
         return false
     end
     if IsPedInAnyVehicle(PlayerPedId(), false) then
-        Notify("You are already in a vehicle!", "error")
+        Notify("You are already in a vehicle!", "error", "already_in_vehicle")
         return false
     end
     if wagon and DoesEntityExist(wagon) then
-        Notify("You already have an active taxi wagon! Please use or delete the existing one.", "error")
+        Notify("You already have an active taxi wagon! Please use or delete the existing one.", "error", "taxi_exists")
         return false
     end
     local playerPed = PlayerPedId()
@@ -481,12 +492,12 @@ local function SpawnTaxiWagon(coords, heading)
             Notify("Taxi wagon spawned!", "success")
             return true
         else
-            Notify("Failed to spawn taxi!", "error")
+            Notify("Failed to spawn taxi!", "error", "spawn_failed")
             SetModelAsNoLongerNeeded(model)
             return false
         end
     else
-        Notify("Failed to load taxi model!", "error")
+        Notify("Failed to load taxi model!", "error", "model_load_failed")
         return false
     end
 end
@@ -570,7 +581,7 @@ end)
 -- Main passenger spawning and boarding thread
 Citizen.CreateThread(function()
     if not Config.EnablePassengerTransport then
-        Notify('Passenger transport mission is disabled.', 'error')
+        Notify('Passenger transport mission is disabled.', 'error', 'transport_disabled')
         return
     end
     local wasInWagon = false
@@ -608,7 +619,7 @@ end)
 function DropOffPassengers(dropoffIndex, manual)
     if not passengers or #passengers == 0 then
         if manual then
-            Notify('Error: No passengers to drop off!', 'error')
+            Notify('Error: No passengers to drop off!', 'error', 'no_passengers_dropoff')
         end
         return
     end
@@ -635,7 +646,7 @@ function DropOffPassengers(dropoffIndex, manual)
                         if DoesEntityExist(passenger) then
                             DeletePed(passenger)
                             processedNPCs[passenger] = nil
-                            Notify('Passenger dropped off!', 'success')
+                            Notify('Passenger dropped off!', 'success', 'passenger_dropped')
                             TriggerServerEvent('passengerTransport:rewardPlayer', dropoff.Name)
                             passengerData[passenger] = nil
                             table.insert(passengersToRemove, i)
@@ -655,7 +666,7 @@ function DropOffPassengers(dropoffIndex, manual)
         table.remove(passengers, passengersToRemove[i])
     end
     if manual and #passengersToRemove == 0 then
-        Notify('No passengers for this drop-off location!', 'warning')
+        Notify('No passengers for this drop-off location!', 'warning', 'no_passengers_location')
     end
     -- Clean up previous blip
     if dropoffBlip and DoesBlipExist(dropoffBlip) then
@@ -672,8 +683,9 @@ function DropOffPassengers(dropoffIndex, manual)
     dropoffAssignmentCounts = {}
 end
 
--- Mission failure logic
+-- Mission failure logic with cooldown
 function FailMission(reason)
+    Notify(reason, 'error', 'mission_fail')
     EndMission()
 end
 
@@ -694,9 +706,10 @@ function EndMission()
         ClearGpsMultiRoute()
         SetGpsMultiRouteRender(false)
     end
-    Notify('Passenger transport ended. Get back on wagon to resume.', 'info')
+    Notify('Passenger transport ended. Get back on wagon to resume.', 'info', 'mission_ended')
 end
 
+-- Mission monitoring thread with cooldowns
 Citizen.CreateThread(function()
     if not Config.EnablePassengerTransport then return end
     while true do
@@ -713,22 +726,18 @@ Citizen.CreateThread(function()
     end
 end)
 
-
-
-
-
--- Command to delete taxi
+-- Command to delete taxi with cooldown
 RegisterCommand("deletetaxi", function(source, args, rawCommand)
     if not Config.EnablePassengerTransport or not HasTaxiJob() then
-        Notify("You must be a taxi driver to use this command!", "error")
+        Notify("You must be a taxi driver to use this command!", "error", "delete_taxi_job")
         return
     end
     if wagon and DoesEntityExist(wagon) then
         DeleteVehicle(wagon)
         wagon = nil
-        Notify("Taxi wagon deleted.", "success")
+        Notify("Taxi wagon deleted.", "success", "taxi_deleted")
     else
-        Notify("No active taxi wagon to delete!", "error")
+        Notify("No active taxi wagon to delete!", "error", "no_taxi_delete")
     end
 end, false)
 
